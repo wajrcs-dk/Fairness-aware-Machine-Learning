@@ -1,3 +1,12 @@
+"""
+
+Module for experimenting with Themis-ml.
+Implementation of discrimination and mitigation.
+
+@author Waqar Alamgir <w.alamgir@tu-braunschweig.de>
+
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn import tree
@@ -25,29 +34,30 @@ def calculateAuc(case, clf, x_test, y_test, s_test):
 
 def meanDifference(y_train, y_pred, s_train, s_test):
 	# Calculates MD
-	md_y_true = mean_difference(y_train, s_train)[0]
+	md_y_train = mean_difference(y_train, s_train)[0]
 	md_y_pred = mean_difference(y_pred, s_test)[0]
-	return md_y_pred - md_y_true
+	return md_y_pred - md_y_train
 
 def accuracyScore(y_test, y_pred):
 	# Calucates Accuracy
 	return accuracy_score(y_test, y_pred)
 
-def printResult(case, auc, md, ac):
-	# Prints result
-	print case
-	print 'AUC:', auc
-	print 'MD:', md
-	print 'Acuracy:', ac
+def printResult(case, auc, md, ac, print_label):
+	# Prints result	
+	if print_label:
+		print "\t", 'AUC', "\t", 'MD', "\t", 'Acuracy'
+	print case, "\t", round(auc, 2), "\t", round(md, 2), "\t", round(ac, 2)
+	
 
 # entropy | gini
-def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf):
+def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf, print_label):
 	dataframe = pd.read_csv(inputFile, header=0, names=columnNames)
 	dataX = pd.read_csv(inputFile, header=0, usecols=usecols)
 
 	x = np.array(dataX)
 	y = np.array(dataframe[pClass])
 	s = np.array(dataframe[sClass])
+	y_pred = []
 
 	if sClass == 'race':
 		s[s >= 1] = 1
@@ -62,18 +72,18 @@ def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf):
 		s[s > 25] = 1
 
 	if case == 'RTV':
-		massager = pp.Relabeller(ranker=tree.DecisionTreeClassifier(criterion='gini', random_state = 100, max_depth=7, min_samples_leaf=5))
+		massager = pp.Relabeller(ranker=clf)
 		# obtain a new set of labels
 		y = massager.fit(x, y, s).transform(x)
 
 	# Do the slpitting
-	x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(x, y, s, test_size=0.5, random_state=42)
+	x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(x, y, s, test_size=0.7, random_state=42)
 
 	if case == 'CFM':
 		clf = LinearACFClassifier()
 		y_pred = clf.fit(x_train, y_train, s_train).predict(x_test, s_test)
 	elif case == 'ROC':
-		clf = ppd.SingleROClassifier(estimator=tree.DecisionTreeClassifier(criterion='gini', random_state = 100, max_depth=7, min_samples_leaf=5))
+		clf = ppd.SingleROClassifier(estimator=clf)
 		y_pred = clf.fit(x_train, y_train).predict(x_test, s_test)
 	else:
 		y_pred = clf.fit(x_train, y_train).predict(x_test)
@@ -87,4 +97,4 @@ def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf):
 	# Calucating Accuracy
 	ac = accuracyScore(y_test, y_pred)
 
-	printResult(case, auc, md, ac)
+	printResult(case, auc, md, ac, print_label)
