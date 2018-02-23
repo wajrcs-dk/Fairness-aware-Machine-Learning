@@ -1,0 +1,79 @@
+Data set 1
+
+DecisionTree
+
+personal_status_and_sex:
+	AUC 	MD 	Acuracy
+B 	0.64 	0.03 	0.66
+RPA 	0.65 	0.07 	0.7
+RTV 	1.0 	0.0 	1.0
+CFM 	0.74 	0.15 	0.74
+ROC 	0.64 	-0.07 	0.66
+
+foreign_worker:
+	AUC 	MD 	Acuracy
+B 	0.64 	0.06 	0.66
+RPA 	0.64 	0.04 	0.68
+RTV 	0.66 	0.35 	0.69
+CFM 	0.75 	0.1 	0.75
+ROC 	0.64 	-0.03 	0.66
+
+Age_in_years:
+	AUC 	MD 	Acuracy
+B 	0.64 	0.02 	0.66
+RPA 	0.64 	-0.05 	0.67
+RTV 	0.71 	-0.01 	0.72
+CFM 	0.73 	-0.27 	0.73
+ROC 	0.64 	0.04 	0.66
+
+LogisticRegression
+
+personal_status_and_sex:
+	AUC 	MD 	Acuracy
+B 	0.74 	0.13 	0.74
+RPA 	0.74 	0.12 	0.74
+RTV 	0.69 	0.72 	0.7
+CFM 	0.74 	0.15 	0.74
+ROC 	0.74 	0.15 	0.72
+
+foreign_worker:
+	AUC 	MD 	Acuracy
+B 	0.74 	0.11 	0.74
+RPA 	0.74 	0.03 	0.73
+RTV 	0.78 	0.36 	0.75
+CFM 	0.75 	0.1 	0.75
+ROC 	0.74 	0.1 	0.72
+
+Age_in_years:
+	AUC 	MD 	Acuracy
+B 	0.74 	-0.01 	0.74
+RPA 	0.75 	-0.09 	0.74
+RTV 	0.81 	0.01 	0.8
+CFM 	0.73 	-0.27 	0.73
+ROC 	0.74 	-0.02 	0.72
+
+RandomForest
+
+personal_status_and_sex:
+	AUC 	MD 	Acuracy
+B 	0.7 	0.11 	0.73
+RPA 	0.75 	0.12 	0.76
+RTV 	0.99 	0.17 	0.94
+CFM 	0.74 	0.15 	0.74
+ROC 	0.74 	0.1 	0.71
+
+foreign_worker:
+	AUC 	MD 	Acuracy
+B 	0.73 	0.0 	0.74
+RPA 	0.72 	-0.03 	0.72
+RTV 	0.76 	0.5 	0.74
+CFM 	0.75 	0.1 	0.75
+ROC 	0.71 	-0.16 	0.67
+
+Age_in_years:
+	AUC 	MD 	Acuracy
+B 	0.69 	-0.03 	0.7
+RPA 	0.69 	-0.14 	0.72
+RTV 	0.77 	-0.02 	0.76
+CFM 	0.73 	-0.27 	0.73
+ROC 	0.68 	-0.03 	0.7
