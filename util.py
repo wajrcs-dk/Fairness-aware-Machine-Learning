@@ -7,94 +7,207 @@ Implementation of discrimination and mitigation.
 
 """
 
-import pandas as pd
+import itertools
 import numpy as np
-from sklearn import tree
-from sklearn import metrics
-from sklearn import preprocessing
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split
-from themis_ml.preprocessing import relabelling as pp
-from themis_ml.metrics import (mean_difference, normalized_mean_difference)
-from themis_ml.linear_model import LinearACFClassifier
-from themis_ml.postprocessing import reject_option_classification as ppd
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.metrics import (accuracy_score, roc_auc_score, f1_score)
+from themis_ml.preprocessing.relabelling import Relabeller
+from themis_ml.meta_estimators import FairnessAwareMetaEstimator
+from themis_ml.linear_model.counterfactually_fair_models import LinearACFClassifier
+from themis_ml.postprocessing.reject_option_classification import SingleROClassifier
+from themis_ml import datasets
+from themis_ml.datasets.german_credit_data_map import preprocess_german_credit_data
+from themis_ml.metrics import mean_difference, normalized_mean_difference, mean_confidence_interval
 
-def calculateAuc(case, clf, x_test, y_test, s_test):
-	# Calculates AUC
-	if case == 'ROC':
-		prob = clf.predict_proba(x_test, s_test)[:,1]
-	else:
-		if case == 'CFM':
-			prob = clf.predict_proba(x_test, s_test)[:,1]
-		else:
-			prob = clf.predict_proba(x_test)[:,1]
-	lb = preprocessing.LabelBinarizer()
-	y_test_bin = lb.fit_transform(y_test)
-	return metrics.roc_auc_score(y_test_bin, prob)
+N_SPLITS = 10
+N_REPEATS = 5
+RANDOM_STATE = 1000
 
-def meanDifference(y_train, y_pred, s_train, s_test):
-	# Calculates MD
-	md_y_train = mean_difference(y_train, s_train)[0]
-	md_y_pred = mean_difference(y_pred, s_test)[0]
-	return md_y_pred - md_y_train
+def comparison(experiment_baseline, experiment_naive, experiment_relabel, experiment_acf, experiment_single_roc):
+	compare_experiments = (
+	    pd.concat([
+	        experiment_baseline.assign(experiment="B"),
+	        experiment_naive.assign(experiment="RPA"),
+	        experiment_relabel.assign(experiment="RTV"),
+	        experiment_acf.assign(experiment="CFM"),
+	        experiment_single_roc.assign(experiment="ROC")
+	    ])
+	    .assign(
+	        protected_class=lambda df: df.protected_class.str.replace("_", " "),
+	    )
+	)
+	return compare_experiments
 
-def accuracyScore(y_test, y_pred):
-	# Calucates Accuracy
-	return accuracy_score(y_test, y_pred)
+def compare_experiment_results_multiple_model(experiment_results):
+    comparison_palette = sns.color_palette("Dark2", n_colors=8)
+    g = (
+        experiment_results
+        .query("fold_type == 'test'")
+        .drop(["cv_fold"], axis=1)
+        .pipe(pd.melt, id_vars=["experiment", "protected_class", "estimator",
+                                "fold_type"],
+              var_name="metric", value_name="score")
+        .assign(
+            metric=lambda df: df.metric.str.replace("_", " "))
+        .pipe((sns.factorplot, "data"), y="experiment",
+              x="score", hue="metric",
+              col="protected_class", row="estimator",
+              join=False, size=3, aspect=1.1, dodge=0.3,
+              palette=comparison_palette, margin_titles=True, legend=False))
+    g.set_axis_labels("mean score (95% CI)")
+    for ax in g.axes.ravel():
+        ax.set_ylabel("")
+        plt.setp(ax.texts, text="")
+    g.set_titles(row_template="{row_name}", col_template="{col_name}")
+    plt.legend(title="metric", loc=9, bbox_to_anchor=(-0.65, -0.4))
+    g.fig.legend(loc=9, bbox_to_anchor=(0.5, -0.3))
+    g.fig.tight_layout()
+    g.savefig("output/fairness_aware_comparison.png", dpi=500);
 
-def printResult(case, auc, md, ac, print_label):
-	# Prints result	
-	if print_label:
-		print "\t", 'AUC', "\t", 'MD', "\t", 'Acuracy'
-	print case, "\t", round(auc, 2), "\t", round(md, 2), "\t", round(ac, 2)
-	
+def get_estemators():
+	LOGISTIC_REGRESSION = LogisticRegression(
+    penalty="l2", C=0.001, class_weight="balanced")
+	DECISION_TREE_CLF = DecisionTreeClassifier(
+	    criterion="entropy", max_depth=10, min_samples_leaf=10, max_features=10,
+	    class_weight="balanced")
+	RANDOM_FOREST_CLF = RandomForestClassifier(
+	    criterion="entropy", n_estimators=50, max_depth=10, max_features=10,
+	    min_samples_leaf=10, class_weight="balanced")
+	return [
+	    ("LogisticRegression", LOGISTIC_REGRESSION),
+	    ("DecisionTree", DECISION_TREE_CLF),
+	    ("RandomForest", RANDOM_FOREST_CLF)
+	]
 
-# entropy | gini
-def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf, print_label):
-	dataframe = pd.read_csv(inputFile, header=0, names=columnNames)
-	dataX = pd.read_csv(inputFile, header=0, usecols=usecols)
+def generate_summary(s_x, s_y, s_z):
+	experiment = pd.concat([
+	    s_x,
+	    s_y,
+	    s_z
+	])
+	experiment_summary = summarize_experiment_results(experiment)
+	return [experiment, experiment_summary.query("fold_type == 'test'")]
 
-	x = np.array(dataX)
-	y = np.array(dataframe[pClass])
-	s = np.array(dataframe[sClass])
-	y_pred = []
 
-	if sClass == 'race':
-		s[s >= 1] = 1
-	elif sClass == 'personal_status_and_sex':
-		s[s == 0] = 0
-		s[s == 1] = 1
-		s[s == 2] = 0
-		s[s == 3] = 0
-		s[s == 4] = 1
-	elif sClass == 'Age_in_years':
-		s[s <= 25] = 0
-		s[s > 25] = 1
+def get_estimator_name(e):
+    return "".join([x for x in str(type(e)).split(".")[-1]
+                    if x.isalpha()])
 
-	if case == 'RTV':
-		massager = pp.Relabeller(ranker=clf)
-		# obtain a new set of labels
-		y = massager.fit(x, y, s).transform(x)
+def get_grid_params(grid_params_dict):
+    """Get outer product of grid search parameters."""
+    return [
+        dict(params) for params in itertools.product(
+            *[[(k, v_i) for v_i in v] for
+              k, v in grid_params_dict.items()])]
 
-	# Do the slpitting
-	x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(x, y, s, test_size=0.7, random_state=42)
+def fit_with_s(estimator):
+    has_relabeller = getattr(estimator, "relabeller", None) is not None
+    child_estimator = getattr(estimator, "estimator", None)
+    estimator_fit_with_s = getattr(estimator, "S_ON_FIT", False)
+    child_estimator_fit_with_s = getattr(child_estimator, "S_ON_FIT", False)
+    return has_relabeller or estimator_fit_with_s or\
+        child_estimator_fit_with_s
 
-	if case == 'CFM':
-		clf = LinearACFClassifier()
-		y_pred = clf.fit(x_train, y_train, s_train).predict(x_test, s_test)
-	elif case == 'ROC':
-		clf = ppd.SingleROClassifier(estimator=clf)
-		y_pred = clf.fit(x_train, y_train).predict(x_test, s_test)
-	else:
-		y_pred = clf.fit(x_train, y_train).predict(x_test)
+def predict_with_s(estimator):
+    estimator_pred_with_s = getattr(estimator, "S_ON_PREDICT", False)
+    child_estimator = getattr(estimator, "estimator", None)
+    return estimator_pred_with_s or \
+        getattr(child_estimator, "S_ON_PREDICT", False)
 
-	# Calculating AUC
-	auc = calculateAuc(case, clf, x_test, y_test, s_test)
+def summarize_experiment_results(experiment_df):
+    return (
+        experiment_df
+        .drop("cv_fold", axis=1)
+        .groupby(["protected_class", "estimator", "fold_type"])
+        .mean())
 
-	# Calculating MD
-	md = meanDifference(y_train, y_pred, s_train, s_test)
+def plot_experiment_results(experiment_results):
+    return (
+        experiment_results
+        .query("fold_type == 'test'")
+        .drop(["fold_type", "cv_fold"], axis=1)
+        .pipe(pd.melt, id_vars=["protected_class", "estimator"],
+              var_name="metric", value_name="score")
+        .pipe((sns.factorplot, "data"), y="metric",
+              x="score", hue="estimator", col="protected_class", col_wrap=3,
+              size=3.5, aspect=1.2, join=False, dodge=0.4))
 
-	# Calucating Accuracy
-	ac = accuracyScore(y_test, y_pred)
+def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True):
+    performance_scores = []
+    # stratified groups tries to balance out y and s
+    groups = [i + j for i, j in
+              zip(y.astype(str), s.astype(str))]
+    cv = RepeatedStratifiedKFold(
+        n_splits=N_SPLITS,
+        n_repeats=N_REPEATS,
+        random_state=RANDOM_STATE)
+    for e_name, e in estimators:
+        
+        msg = "Training model "+e_name+" with s=" + s_name
+        if verbose:
+            print(msg)
+            print("-" * len(msg))
+        
+        for i, (train, test) in enumerate(cv.split(X, y, groups=groups)):
+            
+            # create train and validation fold partitions
+            X_train, X_test = X[train], X[test]
+            y_train, y_test = y[train], y[test]
+            s_train, s_test = s[train], s[test]
 
-	printResult(case, auc, md, ac, print_label)
+            # fit model and generate train and test predictions
+            if fit_with_s(e):
+                e.fit(X_train, y_train, s_train)
+            else:
+                e.fit(X_train, y_train)
+                
+            train_pred_args = (X_train, s_train) if predict_with_s(e) \
+                else (X_train, )
+            test_pred_args = (X_test, s_test) if predict_with_s(e) \
+                else (X_test, )
+                
+            train_pred_prob = e.predict_proba(*train_pred_args)[:, 1]
+            train_pred = e.predict(*train_pred_args)
+            test_pred_prob = e.predict_proba(*test_pred_args)[:, 1]
+            test_pred = e.predict(*test_pred_args)
+
+            # train scores
+            performance_scores.append([
+                s_name, e_name, i, "train",
+                # regular metrics
+                roc_auc_score(y_train, train_pred_prob),
+
+                # fairness metrics
+                mean_difference(train_pred, s_train)[0],
+            ])
+
+            md = 0
+            try :
+                md = mean_difference(test_pred, s_test)[0]
+            except ZeroDivisionError:
+                md = 0.1
+            # test scores
+            performance_scores.append([
+                s_name, e_name, i, "test",
+                # regular metrics
+                roc_auc_score(y_test, test_pred_prob),
+                # fairness metrics
+                md
+            ])
+    
+    return pd.DataFrame(
+        performance_scores,
+        columns=[
+            "protected_class", "estimator", "cv_fold", "fold_type",
+            "auc", "mean_diff"])
