@@ -42,6 +42,8 @@ german_credit_preprocessed = (
     .assign(age_below_25=lambda df: df["age_in_years"] <= 25)
 )
 
+print german_credit_preprocessed.head()
+
 print 'credit_risk'
 credit_risk = german_credit_preprocessed.credit_risk
 credit_risk.value_counts()
@@ -145,7 +147,7 @@ feature_set_no_sex = [
         'personal_status_and_sex_male_married/widowed',
         'personal_status_and_sex_male_single']]
 feature_set_no_foreign = [f for f in feature_set_1 if f != "foreign_worker"]
-feature_set_no_age = [f for f in feature_set_1 if f != "age_in_years"]
+feature_set_no_age = [f for f in feature_set_1 if f != "age"]
 
 # training and target data
 X_no_sex = german_credit_preprocessed[feature_set_no_sex].values
@@ -234,6 +236,10 @@ u.plot_experiment_results(experiment_single_roc[0])
 # Comparison
 #################################################
 
-compare_experiments = u.comparison(experiment_baseline, experiment_naive, experiment_relabel, experiment_acf, experiment_single_roc)
+compare_experiments = u.comparison(experiment_baseline[0], experiment_naive[0], experiment_relabel[0], experiment_acf[0], experiment_single_roc[0])
 
 u.compare_experiment_results_multiple_model(compare_experiments.query("estimator == 'LogisticRegression'"))
+
+u.compare_experiment_results_multiple_model(compare_experiments.query("estimator == 'DecisionTree'"))
+
+u.compare_experiment_results_multiple_model(compare_experiments.query("estimator == 'RandomForest'"))

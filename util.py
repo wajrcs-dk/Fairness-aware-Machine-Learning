@@ -143,15 +143,20 @@ def plot_experiment_results(experiment_results):
               x="score", hue="estimator", col="protected_class", col_wrap=3,
               size=3.5, aspect=1.2, join=False, dodge=0.4))
 
-def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True):
+def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True, split_by_cloumn=False):
     performance_scores = []
-    # stratified groups tries to balance out y and s
-    groups = [i + j for i, j in
-              zip(y.astype(str), s.astype(str))]
-    cv = RepeatedStratifiedKFold(
-        n_splits=N_SPLITS,
-        n_repeats=N_REPEATS,
-        random_state=RANDOM_STATE)
+
+    if split_by_cloumn != False:
+        cv = enumerate([[0, 1], [1, 2], [3, 4]])
+    else:
+        # stratified groups tries to balance out y and s
+        groups = [i + j for i, j in
+                  zip(y.astype(str), s.astype(str))]
+        cv_obj = RepeatedStratifiedKFold(
+            n_splits=N_SPLITS,
+            n_repeats=N_REPEATS,
+            random_state=RANDOM_STATE)
+    
     for e_name, e in estimators:
         
         msg = "Training model "+e_name+" with s=" + s_name
@@ -159,12 +164,24 @@ def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True):
             print(msg)
             print("-" * len(msg))
         
-        for i, (train, test) in enumerate(cv.split(X, y, groups=groups)):
+        if split_by_cloumn == False:
+            cv = enumerate(cv_obj.split(X, y, groups=groups))
+
+        for i, (train, test) in cv:
             
-            # create train and validation fold partitions
-            X_train, X_test = X[train], X[test]
-            y_train, y_test = y[train], y[test]
-            s_train, s_test = s[train], s[test]
+            if split_by_cloumn != False:
+                # create train and validation fold partitions
+                X_train = X[0]
+                X_test = X[1]
+                y_train = y[0]
+                y_test = y[1]
+                s_train = s[0]
+                s_test = s[1]
+            else:
+                # create train and validation fold partitions
+                X_train, X_test = X[train], X[test]
+                y_train, y_test = y[train], y[test]
+                s_train, s_test = s[train], s[test]
 
             # fit model and generate train and test predictions
             if fit_with_s(e):
@@ -205,6 +222,9 @@ def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True):
                 # fairness metrics
                 md
             ])
+
+            if split_by_cloumn != False:
+                break
     
     return pd.DataFrame(
         performance_scores,
