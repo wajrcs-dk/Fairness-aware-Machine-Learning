@@ -1,0 +1,435 @@
+#################################################
+# Import all libraries
+#################################################
+
+import itertools
+import numpy as np
+import pandas as pd
+from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold, RepeatedStratifiedKFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.metrics import (accuracy_score, roc_auc_score, f1_score)
+from themis_ml import datasets
+from themis_ml.datasets.german_credit_data_map import preprocess_german_credit_data
+from themis_ml.metrics import mean_difference, normalized_mean_difference, mean_confidence_interval
+from themis_ml.preprocessing.relabelling import Relabeller
+from themis_ml.meta_estimators import FairnessAwareMetaEstimator
+from themis_ml.linear_model.counterfactually_fair_models import LinearACFClassifier
+
+#################################################
+
+german_credit = datasets.german_credit(True)
+german_credit[
+    ["credit_risk", "purpose", "age_in_years", "foreign_worker"]].head()
+
+german_credit_preprocessed = (
+    preprocess_german_credit_data(german_credit)
+    # the following binary variable indicates whether someone is female or
+    # not since the unique values in `personal_status` are:
+    # 'personal_status_and_sex_female_divorced/separated/married'
+    # 'personal_status_and_sex_male_divorced/separated'
+    # 'personal_status_and_sex_male_married/widowed'
+    # 'personal_status_and_sex_male_single'
+    .assign(female=lambda df:
+            df["personal_status_and_sex_female_divorced/separated/married"])
+    # we're going to hypothesize here that young people, aged below 25,
+    # might be  considered to have bad credit risk moreso than other groups
+    .assign(age_below_25=lambda df: df["age_in_years"] <= 25)
+)
+
+#################################################
+
+print 'credit_risk'
+credit_risk = german_credit_preprocessed.credit_risk
+credit_risk.value_counts()
+
+#################################################
+
+is_female = german_credit_preprocessed.female
+is_female.value_counts()
+
+#################################################
+# Establish Baseline Metrics
+#################################################
+
+# specify feature set. Note that we're excluding the `is_female`
+# and `age_below_25` columns that we created above.
+feature_set_1 = [
+    'duration_in_month',
+    'credit_amount',
+    'installment_rate_in_percentage_of_disposable_income',
+    'present_residence_since',
+    'age_in_years',
+    'number_of_existing_credits_at_this_bank',
+    'number_of_people_being_liable_to_provide_maintenance_for',
+    'status_of_existing_checking_account',
+    'savings_account/bonds',
+    'present_employment_since',
+    'job',
+    'telephone',
+    'foreign_worker',
+    'credit_history_all_credits_at_this_bank_paid_back_duly',
+    'credit_history_critical_account/other_credits_existing_not_at_this_bank',
+    'credit_history_delay_in_paying_off_in_the_past',
+    'credit_history_existing_credits_paid_back_duly_till_now',
+    'credit_history_no_credits_taken/all_credits_paid_back_duly',
+    'purpose_business',
+    'purpose_car_(new)',
+    'purpose_car_(used)',
+    'purpose_domestic_appliances',
+    'purpose_education',
+    'purpose_furniture/equipment',
+    'purpose_others',
+    'purpose_radio/television',
+    'purpose_repairs',
+    'purpose_retraining',
+    'personal_status_and_sex_female_divorced/separated/married',
+    'personal_status_and_sex_male_divorced/separated',
+    'personal_status_and_sex_male_married/widowed',
+    'personal_status_and_sex_male_single',
+    'other_debtors/guarantors_co-applicant',
+    'other_debtors/guarantors_guarantor',
+    'other_debtors/guarantors_none',
+    'property_building_society_savings_agreement/life_insurance',
+    'property_car_or_other',
+    'property_real_estate',
+    'property_unknown/no_property',
+    'other_installment_plans_bank',
+    'other_installment_plans_none',
+    'other_installment_plans_stores',
+    'housing_for free',
+    'housing_own',
+    'housing_rent',
+]
+
+#################################################
+
+N_SPLITS = 10
+N_REPEATS = 5
+RANDOM_STATE = 1000
+
+def get_estimator_name(e):
+    return "".join([x for x in str(type(e)).split(".")[-1]
+                    if x.isalpha()])
+
+def get_grid_params(grid_params_dict):
+    """Get outer product of grid search parameters."""
+    return [
+        dict(params) for params in itertools.product(
+            *[[(k, v_i) for v_i in v] for
+              k, v in grid_params_dict.items()])]
+
+def fit_with_s(estimator):
+    has_relabeller = getattr(estimator, "relabeller", None) is not None
+    child_estimator = getattr(estimator, "estimator", None)
+    estimator_fit_with_s = getattr(estimator, "S_ON_FIT", False)
+    child_estimator_fit_with_s = getattr(child_estimator, "S_ON_FIT", False)
+    return has_relabeller or estimator_fit_with_s or\
+        child_estimator_fit_with_s
+
+def predict_with_s(estimator):
+    estimator_pred_with_s = getattr(estimator, "S_ON_PREDICT", False)
+    child_estimator = getattr(estimator, "estimator", None)
+    return estimator_pred_with_s or \
+        getattr(child_estimator, "S_ON_PREDICT", False)
+
+def summarize_experiment_results(experiment_df):
+    return (
+        experiment_df
+        .drop("cv_fold", axis=1)
+        .groupby(["protected_class", "estimator", "fold_type"])
+        .mean())
+
+
+
+def plot_experiment_results(experiment_results):
+    return (
+        experiment_results
+        .query("fold_type == 'test'")
+        .drop(["fold_type", "cv_fold"], axis=1)
+        .pipe(pd.melt, id_vars=["protected_class", "estimator"],
+              var_name="metric", value_name="score")
+        .pipe((sns.factorplot, "data"), y="metric",
+              x="score", hue="estimator", col="protected_class", col_wrap=3,
+              size=3.5, aspect=1.2, join=False, dodge=0.4))
+
+def cross_validation_experiment(estimators, X, y, s, s_name, verbose=True):
+    msg = "Training models: protected_class = %s" % s_name
+    if verbose:
+        print(msg)
+        print("-" * len(msg))
+    performance_scores = []
+    # stratified groups tries to balance out y and s
+    groups = [i + j for i, j in
+              zip(y.astype(str), s.astype(str))]
+    cv = RepeatedStratifiedKFold(
+        n_splits=N_SPLITS,
+        n_repeats=N_REPEATS,
+        random_state=RANDOM_STATE)
+    for e_name, e in estimators:
+        if verbose:
+            print("%s, fold:" % e_name),
+        for i, (train, test) in enumerate(cv.split(X, y, groups=groups)):
+            if verbose:
+                print(i),
+            # create train and validation fold partitions
+            X_train, X_test = X[train], X[test]
+            y_train, y_test = y[train], y[test]
+            s_train, s_test = s[train], s[test]
+
+            # fit model and generate train and test predictions
+            if fit_with_s(e):
+                e.fit(X_train, y_train, s_train)
+            else:
+                e.fit(X_train, y_train)
+                
+            train_pred_args = (X_train, s_train) if predict_with_s(e) \
+                else (X_train, )
+            test_pred_args = (X_test, s_test) if predict_with_s(e) \
+                else (X_test, )
+                
+            train_pred_prob = e.predict_proba(*train_pred_args)[:, 1]
+            train_pred = e.predict(*train_pred_args)
+            test_pred_prob = e.predict_proba(*test_pred_args)[:, 1]
+            test_pred = e.predict(*test_pred_args)
+
+            # train scores
+            performance_scores.append([
+                s_name, e_name, i, "train",
+                # regular metrics
+                roc_auc_score(y_train, train_pred_prob),
+
+                # fairness metrics
+                mean_difference(train_pred, s_train)[0],
+            ])
+            # test scores
+            performance_scores.append([
+                s_name, e_name, i, "test",
+                # regular metrics
+                roc_auc_score(y_test, test_pred_prob),
+                # fairness metrics
+                mean_difference(test_pred, s_test)[0]
+            ])
+        if verbose:
+            print("")
+    if verbose:
+        print("")
+    return pd.DataFrame(
+        performance_scores,
+        columns=[
+            "protected_class", "estimator", "cv_fold", "fold_type",
+            "auc", "mean_diff"])
+            
+#################################################
+# Baseline testing
+#################################################
+
+# training and target data
+X = german_credit_preprocessed[feature_set_1].values
+y = german_credit_preprocessed["credit_risk"].values
+s_female = german_credit_preprocessed["female"].values
+s_foreign = german_credit_preprocessed["foreign_worker"].values
+s_age_below_25 = german_credit_preprocessed["age_below_25"].values
+
+LOGISTIC_REGRESSION = LogisticRegression(
+    penalty="l2", C=0.001, class_weight="balanced")
+DECISION_TREE_CLF = DecisionTreeClassifier(
+    criterion="entropy", max_depth=10, min_samples_leaf=10, max_features=10,
+    class_weight="balanced")
+RANDOM_FOREST_CLF = RandomForestClassifier(
+    criterion="entropy", n_estimators=50, max_depth=10, max_features=10,
+    min_samples_leaf=10, class_weight="balanced")
+estimators = [
+    ("LogisticRegression", LOGISTIC_REGRESSION),
+    ("DecisionTree", DECISION_TREE_CLF),
+    ("RandomForest", RANDOM_FOREST_CLF)
+]
+experiment_baseline_female = cross_validation_experiment(estimators, X, y, s_female, "female")
+# experiment_baseline_foreign = cross_validation_experiment(estimators, X, y, s_foreign, "foreign_worker")
+experiment_baseline_age_below_25 = cross_validation_experiment(estimators, X, y, s_age_below_25, "age_below_25")
+
+#################################################
+
+# UTILITY_METRICS = ["auc"]
+# FAIRNESS_METRICS = ["mean_diff"]
+
+experiment_baseline = pd.concat([
+    experiment_baseline_female,
+    # experiment_baseline_foreign,
+    experiment_baseline_age_below_25
+])
+experiment_baseline_summary = summarize_experiment_results(experiment_baseline).query("fold_type == 'test'")
+print experiment_baseline_summary
+
+#################################################
+
+''' 
+import seaborn as sns
+import matplotlib.pyplot as plt
+% matplotlib inline
+
+baseline_df = (
+    experiment_baseline
+    .query("fold_type == 'test' and estimator == 'LogisticRegression'")
+)
+sns.factorplot(y="protected_class", x="mean_diff", orient="h", data=baseline_df,
+               size=4, aspect=2, join=False)
+'''
+
+#################################################
+
+plot_experiment_results(experiment_baseline);
+
+#################################################
+# Naive Fairness-aware Approach: Remove Protected Class
+#################################################
+
+# create feature sets that remove variables with protected class information
+feature_set_no_sex = [
+    f for f in feature_set_1 if
+    f not in [
+        'personal_status_and_sex_female_divorced/separated/married',
+        'personal_status_and_sex_male_divorced/separated',
+        'personal_status_and_sex_male_married/widowed',
+        'personal_status_and_sex_male_single']]
+feature_set_no_foreign = [f for f in feature_set_1 if f != "foreign_worker"]
+feature_set_no_age = [f for f in feature_set_1 if f != "age_in_years"]
+
+# training and target data
+X_no_sex = german_credit_preprocessed[feature_set_no_sex].values
+X_no_foreign = german_credit_preprocessed[feature_set_no_foreign].values
+X_no_age = german_credit_preprocessed[feature_set_no_age].values
+
+experiment_naive_female = cross_validation_experiment(
+    estimators, X_no_sex, y, s_female, "female")
+experiment_naive_foreign = cross_validation_experiment(
+    estimators, X_no_foreign, y, s_foreign, "foreign_worker")
+experiment_naive_age_below_25 = cross_validation_experiment(
+    estimators, X_no_age, y, s_age_below_25, "age_below_25")
+
+#################################################
+
+experiment_naive = pd.concat([
+    experiment_naive_female,
+    experiment_naive_foreign,
+    experiment_naive_age_below_25
+])
+experiment_naive_summary = summarize_experiment_results(experiment_naive).query("fold_type == 'test'")
+print experiment_naive_summary
+
+#################################################
+
+plot_experiment_results(experiment_naive);
+
+#################################################
+# Fairness-aware Method: Relabelling
+#################################################
+
+# here we use the relabeller class to create new y vectors for each of the
+# protected class contexts.
+
+# we also use the FairnessAwareMetaEstimator as a convenience class to
+# compose together different fairness-aware methods. This wraps around the
+# estimators that we defined in the previous
+relabeller = Relabeller()
+relabelling_estimators = [
+    (name, FairnessAwareMetaEstimator(e, relabeller=relabeller))
+    for name, e in estimators]
+
+experiment_relabel_female = cross_validation_experiment(
+    relabelling_estimators, X_no_sex, y, s_female, "female")
+experiment_relabel_foreign = cross_validation_experiment(
+    relabelling_estimators, X_no_foreign, y, s_foreign, "foreign_worker")
+experiment_relabel_age_below_25 = cross_validation_experiment(
+    relabelling_estimators, X_no_age, y, s_age_below_25, "age_below_25")
+
+#################################################
+
+experiment_relabel = pd.concat([
+    experiment_relabel_female,
+    experiment_relabel_foreign,
+    experiment_relabel_age_below_25
+])
+experiment_relabel_summary = summarize_experiment_results(experiment_relabel).query("fold_type == 'test'")
+print experiment_relabel_summary
+
+#################################################
+
+plot_experiment_results(experiment_relabel);
+
+#################################################
+# Fairness-aware Method: Additive Counterfactually Fair Model
+#################################################
+
+LINEAR_REG = LinearRegression()
+DECISION_TREE_REG = DecisionTreeRegressor(max_depth=10, min_samples_leaf=10)
+RANDOM_FOREST_REG = RandomForestRegressor(
+    n_estimators=50, max_depth=10, min_samples_leaf=10)
+
+# use the estimators defined above to define the linear additive
+# counterfactually fair models
+linear_acf_estimators = [
+    (name, LinearACFClassifier(
+         target_estimator=e,
+         binary_residual_type="absolute"))
+    for name, e in estimators]
+
+experiment_acf_female = cross_validation_experiment(
+    linear_acf_estimators, X_no_sex, y, s_female, "female")
+experiment_acf_foreign = cross_validation_experiment(
+    linear_acf_estimators, X_no_foreign, y, s_foreign, "foreign_worker")
+experiment_acf_age_below_25 = cross_validation_experiment(
+    linear_acf_estimators, X_no_age, y, s_age_below_25, "age_below_25")
+
+#################################################
+
+experiment_acf = pd.concat([
+    experiment_acf_female,
+    experiment_acf_foreign,
+    experiment_acf_age_below_25
+])
+experiment_acf_summary = summarize_experiment_results(experiment_acf).query("fold_type == 'test'")
+print experiment_acf_summary
+
+#################################################
+
+plot_experiment_results(experiment_acf);
+
+#################################################
+# Reject-option Classification
+#################################################
+
+# use the estimators defined above to define the linear additive
+# counterfactually fair models
+single_roc_clf_estimators = [
+    (name, SingleROClassifier(estimator=e))
+    for name, e in estimators]
+
+experiment_single_roc_female = cross_validation_experiment(
+    single_roc_clf_estimators, X_no_sex, y, s_female, "female")
+experiment_single_roc_foreign = cross_validation_experiment(
+    single_roc_clf_estimators, X_no_foreign, y, s_foreign, "foreign_worker")
+experiment_single_roc_age_below_25 = cross_validation_experiment(
+    single_roc_clf_estimators, X_no_age, y, s_age_below_25, "age_below_25")
+
+#################################################
+
+experiment_single_roc = pd.concat([
+    experiment_single_roc_female,
+    experiment_single_roc_foreign,
+    experiment_single_roc_age_below_25
+])
+experiment_single_roc_summary = summarize_experiment_results(experiment_single_roc).query("fold_type == 'test'")
+print experiment_single_roc_summary
+
+#################################################
+
+plot_experiment_results(experiment_acf);
+
+#################################################

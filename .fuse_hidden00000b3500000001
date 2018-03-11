@@ -1,0 +1,147 @@
+"""
+
+Module for experimenting with Themis-ml.
+Implementation of discrimination and mitigation.
+
+@author Waqar Alamgir <w.alamgir@tu-braunschweig.de>
+
+"""
+
+import pandas as pd
+import numpy as np
+from sklearn import tree
+from sklearn import metrics
+from sklearn import preprocessing
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.base import clone
+from themis_ml.preprocessing.relabelling import Relabeller
+from themis_ml.meta_estimators import FairnessAwareMetaEstimator
+from themis_ml.metrics import (mean_difference, normalized_mean_difference)
+from themis_ml.linear_model import LinearACFClassifier
+from themis_ml.postprocessing import reject_option_classification as ppd
+
+def calculateAuc(case, clf, x_test, y_test, s_test):
+	# Calculates AUC
+	if case == 'ROC':
+		prob = clf.predict_proba(x_test, s_test)[:,1]
+	else:
+		if case == 'CFM':
+			prob = clf.predict_proba(x_test, s_test)[:,1]
+		else:
+			prob = clf.predict_proba(x_test)[:,1]
+	lb = preprocessing.LabelBinarizer()
+	y_test_bin = lb.fit_transform(y_test)
+	return metrics.roc_auc_score(y_test_bin, prob)
+
+def meanDifference(y_train, y_pred, s_train, s_test):
+	# Calculates MD
+	md_y_train = mean_difference(y_train, s_train)[0]
+	md_y_pred = mean_difference(y_pred, s_test)[0]
+	return md_y_pred - md_y_train
+
+def accuracyScore(y_test, y_pred):
+	# Calucates Accuracy
+	return accuracy_score(y_test, y_pred)
+
+def printResult(case, auc, md, ac, print_label):
+	# Prints result	
+	if print_label:
+		print "\t", 'AUC', "\t", 'MD', "\t", 'Acuracy'
+	print case, "\t", round(auc, 2), "\t", round(md, 2), "\t", round(ac, 2)
+
+# entropy | gini
+def exeCaseWithData(clf, case, x, y, s, s_name, print_label):
+	y_pred = []
+	
+	zip_data = zip(y.astype(str), s_female.astype(str))
+
+	print zip_data
+
+	return
+
+	# stratified groups tries to balance out y and s
+    # groups = [i + j for i, j in zip_data]
+
+    cv = RepeatedStratifiedKFold(n_splits=N_SPLITS, n_repeats=N_REPEATS, random_state=RANDOM_STATE)
+
+	if case == 'RTV':
+		relabeller = Relabeller()
+		clf = FairnessAwareMetaEstimator(clf, relabeller=relabeller)
+
+	for i, (train, test) in enumerate(cv.split(x, y, groups=groups)):
+		# create train and validation fold partitions
+	    X_train, X_test = X[train], X[test]
+	    y_train, y_test = y[train], y[test]
+	    s_train, s_test = s[train], s[test]
+
+		if case == 'CFM':
+			clf = LinearACFClassifier(target_estimator=clf, binary_residual_type="absolute")
+			y_pred = clf.fit(x_train, y_train, s_train).predict(x_test, s_test)
+		elif case == 'ROC':
+			clf = ppd.SingleROClassifier(estimator=clf)
+			y_pred = clf.fit(x_train, y_train).predict(x_test, s_test)
+		else:
+			y_pred = clf.fit(x_train, y_train).predict(x_test)
+
+		# Calculating AUC
+		auc = calculateAuc(case, clf, x_test, y_test, s_test)
+
+		# Calculating MD
+		md = meanDifference(y_train, y_pred, s_train, s_test)
+
+		# Calucating Accuracy
+		ac = accuracyScore(y_test, y_pred)
+
+		printResult(case, auc, md, ac, print_label)
+	
+
+# entropy | gini
+def exeCase(inputFile, columnNames, case, sClass, pClass, usecols, clf, print_label):
+	dataframe = pd.read_csv(inputFile, header=0, names=columnNames)
+	dataX = pd.read_csv(inputFile, header=0, usecols=usecols)
+
+	x = np.array(dataX)
+	y = np.array(dataframe[pClass])
+	s = np.array(dataframe[sClass])
+	y_pred = []
+
+	if sClass == 'race':
+		s[s >= 1] = 1
+	elif sClass == 'personal_status_and_sex':
+		s[s == 0] = 0
+		s[s == 1] = 1
+		s[s == 2] = 0
+		s[s == 3] = 0
+		s[s == 4] = 1
+	elif sClass == 'Age_in_years':
+		s[s <= 25] = 0
+		s[s > 25] = 1
+
+	if case == 'RTV':
+		massager = pp.Relabeller(ranker=clf)
+		# obtain a new set of labels
+		y = massager.fit(x, y, s).transform(x)
+
+	# Do the slpitting
+	x_train, x_test, y_train, y_test, s_train, s_test = train_test_split(x, y, s, test_size=0.7, random_state=42)
+
+	if case == 'CFM':
+		clf = LinearACFClassifier()
+		y_pred = clf.fit(x_train, y_train, s_train).predict(x_test, s_test)
+	elif case == 'ROC':
+		clf = ppd.SingleROClassifier(estimator=clf)
+		y_pred = clf.fit(x_train, y_train).predict(x_test, s_test)
+	else:
+		y_pred = clf.fit(x_train, y_train).predict(x_test)
+
+	# Calculating AUC
+	auc = calculateAuc(case, clf, x_test, y_test, s_test)
+
+	# Calculating MD
+	md = meanDifference(y_train, y_pred, s_train, s_test)
+
+	# Calucating Accuracy
+	ac = accuracyScore(y_test, y_pred)
+
+	printResult(case, auc, md, ac, print_label)
